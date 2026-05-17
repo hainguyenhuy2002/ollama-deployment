@@ -17,7 +17,23 @@ echo "Model name : $MODEL_NAME"
 
 # ---------- 1. Sanity checks ----------
 if ! command -v ollama &>/dev/null; then
-  echo "[ERROR] ollama not found. Install from https://ollama.com/download"
+  echo "[INFO] ollama not found. Installing automatically..."
+  if command -v curl &>/dev/null; then
+    curl -fsSL https://ollama.com/install.sh | sh
+  elif command -v wget &>/dev/null; then
+    wget -qO- https://ollama.com/install.sh | sh
+  else
+    echo "[ERROR] Neither curl nor wget found. Install Ollama manually:"
+    echo "  https://ollama.com/download"
+    exit 1
+  fi
+  # Reload PATH so the newly installed binary is found
+  export PATH="$PATH:/usr/local/bin"
+fi
+
+if ! command -v ollama &>/dev/null; then
+  echo "[ERROR] Ollama installation failed. Please install manually:"
+  echo "  curl -fsSL https://ollama.com/install.sh | sh"
   exit 1
 fi
 
