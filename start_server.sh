@@ -17,7 +17,7 @@ set -e
 GPUS="1,2,3,4,5,6"          # Which GPUs to expose to Ollama (skip busy GPU 0)
 OLLAMA_PORT=11434            # Ollama daemon port
 API_PORT=8000                # FastAPI server port
-MODEL_NAME="llama3"   # Must match what you used in setup_model.sh
+MODEL_NAME="llama3.3:70b"   # Must match what you used in setup_model.sh
 LOG_DIR="./logs"
 # ---------------------------------------------
 
