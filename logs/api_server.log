@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/villa/rhh25/ollama-deployment/api_server.py", line 35, in <module>
+    import httpx
+ModuleNotFoundError: No module named 'httpx'
