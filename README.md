@@ -6,16 +6,16 @@ FastAPI wrapper around Ollama, configured for **8× Huawei Ascend 910B3** NPUs (
 
 ## Prerequisites
 
-**sudo is not required.** Go is downloaded and installed locally by `build_ollama_npu.sh` if it is missing. cmake, gcc, git, and curl must be available system-wide — ask your sysadmin if they are missing (`sudo apt install cmake build-essential git curl`).
+**No sudo or root access required.** Go is downloaded locally by `build_ollama_npu.sh`. The CANN toolkit is auto-detected from your environment — if `npu-smi` is already on your PATH, the scripts find it automatically. cmake, gcc, and git must be installed system-wide by your sysadmin.
 
 | Requirement | Version | How to get it |
 |---|---|---|
-| Huawei CANN Toolkit | ≥ 7.0 | System-wide install by sysadmin — [Download](https://www.hiascend.com/software/cann/community). Default path: `/usr/local/Ascend/ascend-toolkit/latest` |
-| Go | ≥ 1.22 | **Auto-installed to `~/go`** by `build_ollama_npu.sh` if missing — no sudo needed |
-| cmake | ≥ 3.24 | System package — `sudo apt install cmake` (sysadmin) |
-| gcc/g++ | ≥ 10 | System package — `sudo apt install build-essential` (sysadmin) |
+| Huawei CANN Toolkit | ≥ 7.0 | Installed by sysadmin — auto-detected from `npu-smi` location or `$ASCEND_HOME`. **You don't need to know the path.** |
+| Go | ≥ 1.22 | **Auto-installed to `~/go`** by `build_ollama_npu.sh` — no sudo needed |
+| cmake | ≥ 3.24 | Sysadmin installs — usually already present on compute servers |
+| gcc/g++ | ≥ 10 | Sysadmin installs — usually already present |
 | Python | ≥ 3.10 | Usually pre-installed; `pip` required |
-| git, curl | any | System packages — usually pre-installed |
+| git, curl | any | Usually pre-installed |
 
 Verify your NPUs are visible before starting:
 ```bash
@@ -52,20 +52,15 @@ source ~/.bashrc
 pip install -r requirements.txt
 ```
 
-### Step 3 — Register your model (one time)
-
-Edit `setup_model.sh` to set `MODEL_PATH` and `MODEL_NAME`, then run:
+### Step 3 — Pull the model (one time)
 
 ```bash
 bash setup_model.sh
 ```
 
-This auto-detects whether your model is GGUF or HuggingFace safetensors format, writes a `Modelfile`, and registers it with Ollama.
+This pulls `llama3` directly from the Ollama hub — no local model files needed. To use a different model, edit `MODEL_NAME` at the top of `setup_model.sh` (e.g. `llama3.1`, `llama3.1:70b`, `mistral`).
 
-> **If your model is in safetensors format and Ollama's importer fails**, convert it to GGUF first:
-> ```bash
-> bash convert_to_gguf.sh
-> ```
+> **Using a local model file instead?** See `convert_to_gguf.sh` and the [local model](#local-model) section below.
 
 ### Step 4 — Start the server
 
@@ -97,10 +92,10 @@ All tuneable values are at the top of `start_server.sh`:
 | Variable | Default | Description |
 |---|---|---|
 | `NPUS` | `0,1,2,3,4,5,6,7` | Which NPU indices to expose (comma-separated) |
-| `MODEL_NAME` | `llama3` | Must match the name used in `setup_model.sh` |
+| `MODEL_NAME` | `llama3` | Ollama hub tag — must match what was pulled in `setup_model.sh` |
 | `OLLAMA_PORT` | `11434` | Ollama daemon port |
 | `API_PORT` | `8000` | FastAPI server port |
-| `CANN_TOOLKIT_ROOT` | `/usr/local/Ascend/ascend-toolkit/latest` | CANN toolkit installation path |
+| `CANN_TOOLKIT_ROOT` | *(auto-detected)* | Detected from `npu-smi` location or `$ASCEND_HOME` — no manual config needed |
 | `OLLAMA_NUM_PARALLEL` | `4` | Max concurrent requests |
 | `OLLAMA_NUM_GPU` | `99` | Layers to offload — `99` means all; set `0` for CPU-only |
 
@@ -223,9 +218,18 @@ bash build_ollama_npu.sh
 ```
 
 **`npu-smi not found`**
-The CANN toolkit is not installed or not on `PATH`. It requires a system-wide install by your sysadmin. Once installed, source its environment:
+The CANN toolkit is not on your `PATH`. Ask your sysadmin to confirm where it is installed, then add the bin directory to your PATH or set `ASCEND_HOME`:
 ```bash
-source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
+export ASCEND_HOME=/path/to/ascend-toolkit/latest
+export PATH="$ASCEND_HOME/bin:$PATH"
+```
+Once `npu-smi` is reachable, the scripts auto-detect the rest.
+
+**CANN toolkit not found at runtime**
+If the scripts can't locate the toolkit automatically, set `ASCEND_HOME` before running:
+```bash
+export ASCEND_HOME=/path/to/ascend-toolkit/latest
+bash start_server.sh
 ```
 
 **Model loads on CPU instead of NPU**

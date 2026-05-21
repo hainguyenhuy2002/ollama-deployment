@@ -20,8 +20,8 @@
 #
 # Prerequisites
 # -------------
-#   • Huawei CANN Toolkit >= 7.0  (needs sysadmin to install system-wide)
-#     Default path: /usr/local/Ascend/ascend-toolkit/latest
+#   • Huawei CANN Toolkit >= 7.0  (installed by sysadmin — auto-detected by this script)
+#     Set ASCEND_HOME if auto-detection fails, e.g.: export ASCEND_HOME=/opt/Ascend/...
 #   • cmake >= 3.24, gcc/g++ >= 10, git, curl  (system packages — no sudo here)
 #   • Go >= 1.22  → auto-installed to ~/go by this script if missing
 #
@@ -39,9 +39,7 @@ INSTALL_DIR="$HOME/.local/bin"                 # where to put the built `ollama`
 BUILD_DIR="$(pwd)/ollama-cann-build"           # temporary build directory
 GO_INSTALL_DIR="$HOME/go"                      # Go toolchain install location (no sudo)
 GO_VERSION="1.23.4"                            # Go version to download if missing (>= Ollama's go.mod requirement)
-
-# CANN toolkit root — adjust if you installed elsewhere
-CANN_TOOLKIT_ROOT="/usr/local/Ascend/ascend-toolkit/latest"
+# (CANN_TOOLKIT_ROOT is auto-detected below — no need to hardcode it)
 # ---------------------------------------------
 
 echo "========================================================"
@@ -116,23 +114,47 @@ echo "[OK] Go $GO_VER  ($(which go))"
 echo "[OK] $(cmake --version | head -1)"
 echo "[OK] $(npu-smi --version 2>/dev/null | head -1 || echo 'npu-smi present')"
 
-if [ ! -d "$CANN_TOOLKIT_ROOT" ]; then
-  fail "CANN toolkit not found at $CANN_TOOLKIT_ROOT. Edit CANN_TOOLKIT_ROOT in this script."
-fi
-echo "[OK] CANN toolkit found at $CANN_TOOLKIT_ROOT"
-
-# ---------- 1. Source CANN environment ----------
+# ---------- 1. Auto-detect and source CANN environment ----------
 echo ""
-echo "[1/5] Sourcing CANN environment..."
+echo "[1/5] Locating CANN toolkit..."
+
+find_cann_root() {
+  if [ -n "${ASCEND_HOME:-}" ] && [ -d "${ASCEND_HOME}" ]; then
+    echo "${ASCEND_HOME}"; return 0
+  fi
+  if command -v npu-smi &>/dev/null; then
+    local bin_dir
+    bin_dir=$(dirname "$(command -v npu-smi)")
+    for candidate in "$(dirname "$bin_dir")" "$(dirname "$(dirname "$bin_dir")")"; do
+      if [ -f "$candidate/bin/setenv.bash" ] || [ -f "$candidate/bin/setenv.sh" ]; then
+        echo "$candidate"; return 0
+      fi
+    done
+  fi
+  for candidate in \
+      "$HOME/Ascend/ascend-toolkit/latest" \
+      "$HOME/ascend-toolkit/latest" \
+      "/opt/Ascend/ascend-toolkit/latest" \
+      "/opt/ascend/ascend-toolkit/latest"; do
+    [ -d "$candidate" ] && echo "$candidate" && return 0
+  done
+  echo ""; return 1
+}
+
+CANN_TOOLKIT_ROOT=$(find_cann_root)
+
+if [ -z "$CANN_TOOLKIT_ROOT" ]; then
+  fail "CANN toolkit not found. Set ASCEND_HOME to its path, e.g.:
+       export ASCEND_HOME=/path/to/ascend-toolkit/latest"
+fi
+echo "[OK] CANN toolkit: $CANN_TOOLKIT_ROOT"
+
 if [ -f "$CANN_TOOLKIT_ROOT/bin/setenv.bash" ]; then
   # shellcheck disable=SC1090
   source "$CANN_TOOLKIT_ROOT/bin/setenv.bash"
 elif [ -f "$CANN_TOOLKIT_ROOT/bin/setenv.sh" ]; then
   # shellcheck disable=SC1090
   source "$CANN_TOOLKIT_ROOT/bin/setenv.sh"
-else
-  echo "[WARN] setenv script not found; setting library paths manually."
-  export LD_LIBRARY_PATH="${CANN_TOOLKIT_ROOT}/lib64:${CANN_TOOLKIT_ROOT}/acllib/lib64:${LD_LIBRARY_PATH:-}"
 fi
 export LD_LIBRARY_PATH="${CANN_TOOLKIT_ROOT}/lib64:${CANN_TOOLKIT_ROOT}/acllib/lib64:${LD_LIBRARY_PATH:-}"
 echo "[OK] CANN env ready"
