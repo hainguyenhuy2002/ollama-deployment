@@ -6,14 +6,16 @@ FastAPI wrapper around Ollama, configured for **8× Huawei Ascend 910B3** NPUs (
 
 ## Prerequisites
 
-| Requirement | Version | Notes |
+**sudo is not required.** Go is downloaded and installed locally by `build_ollama_npu.sh` if it is missing. cmake, gcc, git, and curl must be available system-wide — ask your sysadmin if they are missing (`sudo apt install cmake build-essential git curl`).
+
+| Requirement | Version | How to get it |
 |---|---|---|
-| Huawei CANN Toolkit | ≥ 7.0 | [Download](https://www.hiascend.com/software/cann/community) — default path `/usr/local/Ascend/ascend-toolkit/latest` |
-| Go | ≥ 1.22 | `sudo apt install golang-go` or [go.dev/dl](https://go.dev/dl/) |
-| cmake | ≥ 3.24 | `sudo apt install cmake` |
-| gcc/g++ | ≥ 10 | `sudo apt install build-essential` |
-| Python | ≥ 3.10 | with `pip` |
-| git, curl | any | `sudo apt install git curl` |
+| Huawei CANN Toolkit | ≥ 7.0 | System-wide install by sysadmin — [Download](https://www.hiascend.com/software/cann/community). Default path: `/usr/local/Ascend/ascend-toolkit/latest` |
+| Go | ≥ 1.22 | **Auto-installed to `~/go`** by `build_ollama_npu.sh` if missing — no sudo needed |
+| cmake | ≥ 3.24 | System package — `sudo apt install cmake` (sysadmin) |
+| gcc/g++ | ≥ 10 | System package — `sudo apt install build-essential` (sysadmin) |
+| Python | ≥ 3.10 | Usually pre-installed; `pip` required |
+| git, curl | any | System packages — usually pre-installed |
 
 Verify your NPUs are visible before starting:
 ```bash
@@ -32,12 +34,16 @@ The official Ollama binary does not include Huawei Ascend support. You must buil
 bash build_ollama_npu.sh
 ```
 
-This clones Ollama, compiles llama.cpp with `-DGGML_CANN=ON`, and installs the binary to `~/.local/bin/ollama`. Add it to your PATH:
+This script will:
+- **Auto-download Go** to `~/go` if it is not already installed (no sudo needed)
+- Clone Ollama and compile llama.cpp with `-DGGML_CANN=ON`
+- Install the final binary to `~/.local/bin/ollama`
+
+After it finishes, add both directories to your PATH permanently:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-# Add to ~/.bashrc or ~/.zshrc to make it permanent
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ### Step 2 — Install Python dependencies
@@ -204,8 +210,11 @@ pkill -f "api_server.py"
 **`ollama serve` exits immediately**
 Check the log: `tail -50 logs/ollama.log`. The most common cause is missing CANN libraries on `LD_LIBRARY_PATH`. Make sure you sourced `setenv.bash` before starting, or that `start_server.sh` found it at `CANN_TOOLKIT_ROOT`.
 
+**`Go not found` / Go version too old**
+`build_ollama_npu.sh` downloads Go automatically to `~/go` — no sudo needed. If the download fails (e.g. no internet access on the build machine), download the tarball manually from [go.dev/dl](https://go.dev/dl/), extract it to `~/go`, and add `~/go/bin` to your PATH.
+
 **`npu-smi not found`**
-The CANN toolkit is not installed or not on `PATH`. Install it from [hiascend.com](https://www.hiascend.com/software/cann/community) and source its environment:
+The CANN toolkit is not installed or not on `PATH`. It requires a system-wide install by your sysadmin. Once installed, source its environment:
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
 ```

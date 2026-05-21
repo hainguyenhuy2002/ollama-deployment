@@ -12,22 +12,22 @@
 # Hardware: Huawei Ascend 910B3 (64 GB HBM each)
 # CANN version tested: 25.5.0 (npu-smi version shown in npu-smi info)
 #
-# Prerequisites (install before running this script)
-# --------------------------------------------------
-#   1. Huawei CANN Toolkit >= 7.0
-#      Download: https://www.hiascend.com/software/cann/community
-#      Default install path: /usr/local/Ascend/ascend-toolkit/latest
+# No sudo required
+# ----------------
+# Go is installed to ~/go if not already present.
+# The Ollama binary is installed to ~/.local/bin.
+# cmake, gcc, and git must already be available (ask your sysadmin if missing).
 #
-#   2. Go >= 1.22
-#      sudo apt install golang-go   OR   https://go.dev/dl/
-#
-#   3. cmake >= 3.24, gcc/g++ >= 10, git, curl
-#      sudo apt install cmake build-essential git curl
+# Prerequisites
+# -------------
+#   • Huawei CANN Toolkit >= 7.0  (needs sysadmin to install system-wide)
+#     Default path: /usr/local/Ascend/ascend-toolkit/latest
+#   • cmake >= 3.24, gcc/g++ >= 10, git, curl  (system packages — no sudo here)
+#   • Go >= 1.22  → auto-installed to ~/go by this script if missing
 #
 # Usage
 # -----
 #   bash build_ollama_npu.sh
-#   # Then add the install dir to PATH and run start_server.sh
 # =============================================================================
 
 set -euo pipefail
@@ -37,6 +37,8 @@ OLLAMA_REPO="https://github.com/ollama/ollama.git"
 OLLAMA_VERSION="main"                          # or pin to a tag, e.g. "v0.3.12"
 INSTALL_DIR="$HOME/.local/bin"                 # where to put the built `ollama` binary
 BUILD_DIR="$(pwd)/ollama-cann-build"           # temporary build directory
+GO_INSTALL_DIR="$HOME/go"                      # Go toolchain install location (no sudo)
+GO_VERSION="1.22.4"                            # minimum Go version to download if missing
 
 # CANN toolkit root — adjust if you installed elsewhere
 CANN_TOOLKIT_ROOT="/usr/local/Ascend/ascend-toolkit/latest"
@@ -51,16 +53,66 @@ echo "Build dir          : $BUILD_DIR"
 echo "CANN root          : $CANN_TOOLKIT_ROOT"
 echo ""
 
-# ---------- 0. Sanity checks ----------
+# ---------- 0. Helpers ----------
 fail() { echo "[ERROR] $*" >&2; exit 1; }
 
-command -v go    &>/dev/null || fail "Go not found. Install: sudo apt install golang-go"
-command -v cmake &>/dev/null || fail "cmake not found. Install: sudo apt install cmake"
-command -v git   &>/dev/null || fail "git not found. Install: sudo apt install git"
-command -v npu-smi &>/dev/null || fail "npu-smi not found. Is the CANN toolkit installed?"
+# ---------- 0a. Auto-install Go (no sudo) ----------
+install_go_local() {
+  local arch
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64)  arch="amd64" ;;
+    aarch64) arch="arm64" ;;
+    *)       fail "Unsupported architecture: $arch. Download Go manually from https://go.dev/dl/" ;;
+  esac
+
+  local tarball="go${GO_VERSION}.linux-${arch}.tar.gz"
+  local url="https://go.dev/dl/${tarball}"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+
+  echo "[INFO] Downloading Go ${GO_VERSION} (${arch}) from go.dev..."
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$url" -o "$tmp_dir/$tarball"
+  elif command -v wget &>/dev/null; then
+    wget -q "$url" -O "$tmp_dir/$tarball"
+  else
+    fail "Neither curl nor wget found. Cannot download Go automatically."
+  fi
+
+  echo "[INFO] Extracting Go to $GO_INSTALL_DIR ..."
+  rm -rf "$GO_INSTALL_DIR"
+  mkdir -p "$(dirname "$GO_INSTALL_DIR")"
+  tar -xzf "$tmp_dir/$tarball" -C "$(dirname "$GO_INSTALL_DIR")"
+  # The tarball unpacks to a directory named "go" — rename if needed
+  if [ -d "$(dirname "$GO_INSTALL_DIR")/go" ] && [ "$(dirname "$GO_INSTALL_DIR")/go" != "$GO_INSTALL_DIR" ]; then
+    mv "$(dirname "$GO_INSTALL_DIR")/go" "$GO_INSTALL_DIR"
+  fi
+  rm -rf "$tmp_dir"
+
+  export PATH="$GO_INSTALL_DIR/bin:$PATH"
+  echo "[OK] Go installed to $GO_INSTALL_DIR"
+  echo "     Add to your shell permanently:"
+  echo "       echo 'export PATH=\"$GO_INSTALL_DIR/bin:\$PATH\"' >> ~/.bashrc"
+}
+
+# Check Go; auto-install if missing or too old
+if ! command -v go &>/dev/null; then
+  echo "[WARN] Go not found — installing locally (no sudo required)..."
+  install_go_local
+elif ! go version | awk '{split($3,v,"go"); split(v[2],n,"."); if(n[1]*100+n[2] < 122) exit 1}' 2>/dev/null; then
+  echo "[WARN] Go version is too old (need >= 1.22) — installing newer version locally..."
+  install_go_local
+fi
+
+# ---------- 0b. Check remaining dependencies ----------
+command -v cmake   &>/dev/null || fail "cmake not found. Ask your sysadmin: sudo apt install cmake"
+command -v git     &>/dev/null || fail "git not found. Ask your sysadmin: sudo apt install git"
+command -v gcc     &>/dev/null || fail "gcc not found. Ask your sysadmin: sudo apt install build-essential"
+command -v npu-smi &>/dev/null || fail "npu-smi not found. Is the CANN toolkit installed and on PATH?"
 
 GO_VER=$(go version | awk '{print $3}' | sed 's/go//')
-echo "[OK] Go $GO_VER"
+echo "[OK] Go $GO_VER  ($(which go))"
 echo "[OK] $(cmake --version | head -1)"
 echo "[OK] $(npu-smi --version 2>/dev/null | head -1 || echo 'npu-smi present')"
 
@@ -178,8 +230,8 @@ echo ""
 echo "Binary location : $INSTALL_DIR/ollama"
 echo ""
 echo "Next steps:"
-echo "  1. Add $INSTALL_DIR to your PATH (if not already):"
-echo "       export PATH=\"$INSTALL_DIR:\$PATH\""
+echo "  1. Add the install dirs to your PATH (paste into ~/.bashrc to make permanent):"
+echo "       export PATH=\"$GO_INSTALL_DIR/bin:$INSTALL_DIR:\$PATH\""
 echo ""
 echo "  2. Register your model (one time):"
 echo "       bash setup_model.sh"
