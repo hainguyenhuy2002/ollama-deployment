@@ -213,6 +213,15 @@ Check the log: `tail -50 logs/ollama.log`. The most common cause is missing CANN
 **`Go not found` / Go version too old**
 `build_ollama_npu.sh` downloads Go automatically to `~/go` — no sudo needed. If the download fails (e.g. no internet access on the build machine), download the tarball manually from [go.dev/dl](https://go.dev/dl/), extract it to `~/go`, and add `~/go/bin` to your PATH.
 
+**`go: downloading go1.26.x … i/o timeout`**
+Ollama's `go.mod` has a `toolchain go1.26.x` directive. When your installed Go sees this, it tries to download that version from `proxy.golang.org`, which may be blocked. The script already sets `GOTOOLCHAIN=local` to suppress this — if you see the error, make sure you are running the latest version of the script. You can also set it manually before running:
+```bash
+export GOTOOLCHAIN=local
+export GOPROXY=direct
+export GONOSUMDB="*"
+bash build_ollama_npu.sh
+```
+
 **`npu-smi not found`**
 The CANN toolkit is not installed or not on `PATH`. It requires a system-wide install by your sysadmin. Once installed, source its environment:
 ```bash

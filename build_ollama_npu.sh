@@ -38,7 +38,7 @@ OLLAMA_VERSION="main"                          # or pin to a tag, e.g. "v0.3.12"
 INSTALL_DIR="$HOME/.local/bin"                 # where to put the built `ollama` binary
 BUILD_DIR="$(pwd)/ollama-cann-build"           # temporary build directory
 GO_INSTALL_DIR="$HOME/go"                      # Go toolchain install location (no sudo)
-GO_VERSION="1.22.4"                            # minimum Go version to download if missing
+GO_VERSION="1.23.4"                            # Go version to download if missing (>= Ollama's go.mod requirement)
 
 # CANN toolkit root — adjust if you installed elsewhere
 CANN_TOOLKIT_ROOT="/usr/local/Ascend/ascend-toolkit/latest"
@@ -157,7 +157,28 @@ echo "[3/5] Building llama.cpp with CANN backend (-DGGML_CANN=ON)..."
 LLAMA_BUILD_DIR="$BUILD_DIR/llm/build"
 mkdir -p "$LLAMA_BUILD_DIR"
 
+# ── 3a. Locate llama.cpp source ────────────────────────────────────────────
+
+# Critical Go env overrides — set before ANY go invocation:
+#
+#   GOTOOLCHAIN=local   Ollama's go.mod has "toolchain go1.26.x" which normally
+#                       triggers an automatic download of that toolchain from
+#                       proxy.golang.org.  "local" tells Go: use whatever is
+#                       installed, never try to fetch a newer one.
+#
+#   GOPROXY=direct      Bypass proxy.golang.org entirely; fetch modules straight
+#                       from their source (GitHub etc.).  Set to "off" if the
+#                       build machine has no outbound internet at all.
+#
+#   GONOSUMDB=*         Skip the checksum database (also hosted by Google).
+#
+export GOTOOLCHAIN=local
+export GOPROXY=direct
+export GONOSUMDB="*"
+
 LLAMA_SRC=""
+
+# Check if llama.cpp is already present (re-run scenario)
 for candidate in \
     "$BUILD_DIR/llm/llama.cpp" \
     "$BUILD_DIR/llm/llama" \
@@ -168,11 +189,14 @@ for candidate in \
   fi
 done
 
+# Try go generate (now with GOTOOLCHAIN=local, it won't phone home for go1.26)
 if [ -z "$LLAMA_SRC" ]; then
-  echo "      Running go generate to fetch llama.cpp..."
+  echo "      Running go generate (GOTOOLCHAIN=local — no toolchain download)..."
   cd "$BUILD_DIR"
-  go generate ./llm/... 2>&1 | tail -5 || true
+  GOTOOLCHAIN=local GOPROXY=direct GONOSUMDB="*" \
+    go generate ./llm/... 2>&1 | tail -10 || true
   cd - > /dev/null
+
   for candidate in \
       "$BUILD_DIR/llm/llama.cpp" \
       "$BUILD_DIR/llm/llama"; do
@@ -181,6 +205,43 @@ if [ -z "$LLAMA_SRC" ]; then
       break
     fi
   done
+fi
+
+# Fallback: clone llama.cpp directly from GitHub
+# (used when go generate fails due to network restrictions)
+if [ -z "$LLAMA_SRC" ]; then
+  echo "      go generate did not produce llama.cpp — cloning directly from GitHub..."
+
+  # Try to detect the exact commit Ollama pins for this version
+  LLAMA_COMMIT=""
+  for search_file in \
+      "$BUILD_DIR/llm/generate.go" \
+      "$BUILD_DIR/llm/gen.go" \
+      "$BUILD_DIR/llm/llm.go"; do
+    if [ -f "$search_file" ]; then
+      LLAMA_COMMIT=$(grep -oP '(?<=[Cc]ommit\s*=\s*")[0-9a-f]{7,40}' "$search_file" 2>/dev/null | head -1 || true)
+      [ -n "$LLAMA_COMMIT" ] && break
+    fi
+  done
+
+  LLAMA_CLONE_DIR="$BUILD_DIR/llm/llama.cpp"
+  mkdir -p "$(dirname "$LLAMA_CLONE_DIR")"
+
+  if [ -n "$LLAMA_COMMIT" ]; then
+    echo "      Detected pinned llama.cpp commit: $LLAMA_COMMIT"
+    git clone --depth=1 https://github.com/ggerganov/llama.cpp "$LLAMA_CLONE_DIR"
+    # Fetch the specific commit (depth=1 may not have it; fall back to full fetch)
+    git -C "$LLAMA_CLONE_DIR" fetch --depth=1 origin "$LLAMA_COMMIT" 2>/dev/null \
+      || git -C "$LLAMA_CLONE_DIR" fetch origin "$LLAMA_COMMIT"
+    git -C "$LLAMA_CLONE_DIR" checkout "$LLAMA_COMMIT"
+    echo "[OK] llama.cpp checked out at $LLAMA_COMMIT"
+  else
+    echo "      Could not detect pinned commit — cloning latest llama.cpp HEAD..."
+    echo "      (This may cause minor API mismatches; rebuild if Ollama crashes.)"
+    git clone --depth=1 https://github.com/ggerganov/llama.cpp "$LLAMA_CLONE_DIR"
+  fi
+
+  LLAMA_SRC="$LLAMA_CLONE_DIR"
 fi
 
 [ -n "$LLAMA_SRC" ] || fail "Could not locate llama.cpp source inside $BUILD_DIR"
@@ -209,6 +270,10 @@ export OLLAMA_SKIP_CUDA_GENERATE=1
 export OLLAMA_SKIP_ROCM_GENERATE=1
 export CGO_CFLAGS="-I${LLAMA_SRC}/include -I${LLAMA_SRC}/ggml/include"
 export CGO_LDFLAGS="-L${LLAMA_BUILD_DIR} -lggml -lllama -Wl,-rpath,${LLAMA_BUILD_DIR}"
+# Keep network overrides active for go build as well
+export GOTOOLCHAIN=local
+export GOPROXY=direct
+export GONOSUMDB="*"
 
 go build -o ollama . 2>&1 | tail -10
 
