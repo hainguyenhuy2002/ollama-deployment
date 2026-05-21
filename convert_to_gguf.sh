@@ -5,6 +5,10 @@
 # then re-registers it with Ollama.
 #
 # Fixes: "Error: unknown data type: I32" from Ollama's built-in converter.
+#
+# NPU note: llama.cpp is built with -DGGML_CANN=ON so the resulting GGUF
+# can be served by an Ollama binary that has CANN support (see build_ollama_npu.sh).
+# Source the CANN toolkit environment (setenv.bash) before running this script.
 # =============================================================================
 
 set -e
@@ -68,14 +72,19 @@ echo "[OK] GGUF written to: $GGUF_OUT"
 ls -lh "$GGUF_OUT"
 
 # ---------- 4. Quantize to Q4_K_M (optional but recommended) ----------
-# Q4_K_M = ~4-bit quantisation, excellent quality/speed trade-off on A100.
+# Q4_K_M = ~4-bit quantisation, excellent quality/speed trade-off on 910B3.
+# The 910B3 has 64 GB HBM per card; Q4_K_M lets you fit larger models per card.
 echo ""
 echo "[4/5] Quantizing to Q4_K_M (faster inference, ~50% smaller)..."
 
-# Build llama-quantize if not already built
+# Build llama-quantize if not already built.
+# -DGGML_CANN=ON enables the Huawei Ascend CANN backend.
 if [ ! -f "$LLAMA_CPP_DIR/llama-quantize" ] && [ ! -f "$LLAMA_CPP_DIR/quantize" ]; then
-    echo "      Building llama.cpp quantize tool..."
-    cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON > /dev/null 2>&1
+    echo "      Building llama.cpp quantize tool with CANN backend..."
+    cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" \
+        -DGGML_CANN=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        > /dev/null 2>&1
     cmake --build "$LLAMA_CPP_DIR/build" --config Release -j"$(nproc)" --target llama-quantize > /dev/null 2>&1
     cp "$LLAMA_CPP_DIR/build/bin/llama-quantize" "$LLAMA_CPP_DIR/" 2>/dev/null || \
     cp "$LLAMA_CPP_DIR/build/llama-quantize"     "$LLAMA_CPP_DIR/" 2>/dev/null || true

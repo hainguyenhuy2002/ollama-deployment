@@ -7,23 +7,24 @@ FastAPI server that wraps the local Ollama instance and exposes:
   - POST /generate              — Raw Ollama generate passthrough
   - GET  /v1/models             — List available models
   - GET  /health                — Health check
-  - GET  /gpu/status            — Live nvidia-smi snapshot
+  - GET  /npu/status            — Live npu-smi snapshot (Huawei Ascend 910B3)
 
-Designed for a 7× NVIDIA A100-SXM4-40GB server.
-GPU 0 is excluded by default (busy); GPUs 1-6 are used.
+Designed for an 8× Huawei Ascend 910B3 server (64 GB HBM per card).
+Uses the CANN backend via an Ollama binary built with GGML_CANN support.
 
 Usage
 -----
 Set env vars (or let start_server.sh handle it):
-  MODEL_NAME=mixtral-local
+  MODEL_NAME=llama3
   OLLAMA_BASE_URL=http://localhost:11434
-  CUDA_VISIBLE_DEVICES=1,2,3,4,5,6
+  ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 Then:
   python api_server.py
 """
 
 import os
+import re
 import json
 import time
 import subprocess
@@ -85,8 +86,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="LLM Deployment API",
-    description="OpenAI-compatible API backed by Ollama on multi-GPU A100 server",
-    version="1.0.0",
+    description="OpenAI-compatible API backed by Ollama on 8× Huawei Ascend 910B3 NPU server",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -171,35 +172,81 @@ async def health():
         raise HTTPException(status_code=503, detail=f"Ollama unreachable: {exc}")
 
 
-@app.get("/gpu/status")
-async def gpu_status():
-    """Return live nvidia-smi output as JSON."""
+@app.get("/npu/status")
+async def npu_status():
+    """Return live npu-smi output as JSON (Huawei Ascend 910B3).
+
+    npu-smi info prints a table whose data rows look like:
+      | <npu_id>  <name>  | <health>  | <power_w>  <temp_c>  ...  |
+      | <chip_id>          | <bus_id>  | <aicore_pct>  <mem_used>/<mem_total>  <hbm_used>/<hbm_total> |
+
+    We run npu-smi info to get the summary table and parse it into structured JSON.
+    """
     try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,name,temperature.gpu,utilization.gpu,"
-                "memory.used,memory.total,power.draw,power.limit",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True, text=True, timeout=10,
+        summary = subprocess.run(
+            ["npu-smi", "info"],
+            capture_output=True, text=True, timeout=15,
         )
-        gpus = []
-        for line in result.stdout.strip().splitlines():
-            idx, name, temp, util, mem_used, mem_total, pwr, pwr_lim = [
-                v.strip() for v in line.split(",")
-            ]
-            gpus.append({
-                "index":          int(idx),
-                "name":           name,
-                "temp_c":         int(temp),
-                "util_pct":       int(util),
-                "mem_used_mib":   int(mem_used),
-                "mem_total_mib":  int(mem_total),
-                "power_w":        float(pwr),
-                "power_limit_w":  float(pwr_lim),
-            })
-        return {"gpus": gpus, "timestamp": time.time()}
+
+        npus: list[dict] = []
+
+        # Top row of each NPU block: NPU id, Name, Health, Power(W), Temp(C)
+        top_pat = re.compile(
+            r"^\|\s*(\d+)\s+(\S+)\s*\|\s*(\w+)\s*\|\s*([\d.]+)\s+([\d.]+)\s"
+        )
+        # Bottom row: Chip, Bus-Id, AICore(%), Mem used/total (MB), HBM used/total (MB)
+        bot_pat = re.compile(
+            r"^\|\s*(\d+)\s*\|\s*[\w:.]+\s*\|\s*([\d.]+)\s+"
+            r"([\d.]+)\s*/\s*([\d.]+)\s+"
+            r"([\d.]+)\s*/\s*([\d.]+)"
+        )
+
+        top_rows: dict[int, dict] = {}
+        bot_rows: dict[int, dict] = {}
+
+        for line in summary.stdout.splitlines():
+            m = top_pat.match(line)
+            if m:
+                npu_id = int(m.group(1))
+                top_rows[npu_id] = {
+                    "index":   npu_id,
+                    "name":    m.group(2),
+                    "health":  m.group(3),
+                    "power_w": float(m.group(4)),
+                    "temp_c":  int(m.group(5)),
+                }
+                continue
+            m = bot_pat.match(line)
+            if m:
+                chip_id = int(m.group(1))
+                bot_rows[chip_id] = {
+                    "aicore_pct":   float(m.group(2)),
+                    "mem_used_mb":  float(m.group(3)),
+                    "mem_total_mb": float(m.group(4)),
+                    "hbm_used_mb":  float(m.group(5)),
+                    "hbm_total_mb": float(m.group(6)),
+                }
+
+        for npu_id, top in top_rows.items():
+            entry = dict(top)
+            if npu_id in bot_rows:
+                entry.update(bot_rows[npu_id])
+            npus.append(entry)
+
+        # Fall back to raw text if regex produced nothing
+        raw = summary.stdout if not npus else None
+
+        return {
+            "npus":      npus,
+            "timestamp": time.time(),
+            **({"raw": raw} if raw else {}),
+        }
+
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail="npu-smi not found. Ensure the Huawei CANN toolkit is installed and in PATH.",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

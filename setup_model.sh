@@ -3,6 +3,10 @@
 # setup_model.sh
 # One-time script to register a local HuggingFace model with Ollama.
 # Run this ONCE before starting the API server.
+#
+# NPU note: ensure you are running the CANN-enabled Ollama binary built by
+# build_ollama_npu.sh. The standard pre-built Ollama binary does NOT support
+# Huawei Ascend NPUs and will fall back to CPU.
 # =============================================================================
 
 set -e
@@ -70,7 +74,7 @@ PARAMETER temperature    0.7
 PARAMETER top_p          0.9
 PARAMETER repeat_penalty 1.1
 
-# Number of GPU layers: -1 = offload everything to GPU
+# Number of NPU layers: -1 = offload everything to NPU (Ascend 910B3)
 PARAMETER num_gpu        -1
 
 SYSTEM """You are a helpful AI assistant."""
