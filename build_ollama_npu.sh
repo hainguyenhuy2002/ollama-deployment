@@ -9,8 +9,13 @@
 # Apple Metal. To use Huawei Ascend NPUs you must build Ollama yourself so that
 # its embedded llama.cpp is compiled with -DGGML_CANN=ON.
 #
-# Hardware: Huawei Ascend 910B3 (64 GB HBM each)
-# CANN version tested: 25.5.0 (npu-smi version shown in npu-smi info)
+# Hardware  : 8× Huawei Ascend 910B3, 64 GB HBM each (512 GB total)
+# CANN ver  : 25.5.0  (confirmed via npu-smi info)
+# NUMA topo : 4 NUMA groups, 2 NPUs each
+#               NPU 0,1 → PCIe bus C1/C2
+#               NPU 2,3 → PCIe bus 81/82
+#               NPU 4,5 → PCIe bus 01/02
+#               NPU 6,7 → PCIe bus 41/42
 #
 # No sudo required
 # ----------------
@@ -20,9 +25,10 @@
 #
 # Prerequisites
 # -------------
-#   • Huawei CANN Toolkit >= 7.0  (installed by sysadmin — auto-detected by this script)
-#     Set ASCEND_HOME if auto-detection fails, e.g.: export ASCEND_HOME=/opt/Ascend/...
-#   • cmake >= 3.24, gcc/g++ >= 10, git, curl  (system packages — no sudo here)
+#   • Huawei CANN Toolkit 25.x  (installed by sysadmin — auto-detected)
+#     Set ASCEND_HOME if auto-detection fails:
+#       export ASCEND_HOME=/path/to/ascend-toolkit/latest
+#   • cmake >= 3.24, gcc/g++ >= 10, git, curl  (system packages)
 #   • Go >= 1.22  → auto-installed to ~/go by this script if missing
 #
 # Usage
@@ -34,25 +40,33 @@ set -euo pipefail
 
 # ---------- Config — edit as needed ----------
 OLLAMA_REPO="https://github.com/ollama/ollama.git"
-OLLAMA_VERSION="main"                          # or pin to a tag, e.g. "v0.3.12"
+OLLAMA_VERSION="v0.9.0"                        # pin to a stable release tag
 INSTALL_DIR="$HOME/.local/bin"                 # where to put the built `ollama` binary
 BUILD_DIR="$(pwd)/ollama-cann-build"           # temporary build directory
 GO_INSTALL_DIR="$HOME/go"                      # Go toolchain install location (no sudo)
-GO_VERSION="1.23.4"                            # Go version to download if missing (>= Ollama's go.mod requirement)
-# (CANN_TOOLKIT_ROOT is auto-detected below — no need to hardcode it)
+GO_VERSION="1.23.4"                            # Go version to download if missing
+NPU_COUNT=8                                    # number of Ascend 910B3 NPUs on this server
+HBM_PER_NPU_MB=65536                          # HBM per NPU in MB (64 GB)
+# (CANN_TOOLKIT_ROOT is auto-detected below — override via $ASCEND_HOME if needed)
 # ---------------------------------------------
 
-echo "========================================================"
-echo " Ollama NPU Build — Huawei Ascend 910B3 (CANN backend)"
-echo "========================================================"
-echo "Ollama branch/tag : $OLLAMA_VERSION"
-echo "Install dir        : $INSTALL_DIR"
-echo "Build dir          : $BUILD_DIR"
-echo "CANN root          : $CANN_TOOLKIT_ROOT"
-echo ""
+# Banner is printed after CANN detection so CANN_TOOLKIT_ROOT is populated
+print_banner() {
+  echo "========================================================"
+  echo " Ollama NPU Build — 8× Ascend 910B3 (CANN 25.5.0)"
+  echo "========================================================"
+  echo "Ollama version  : $OLLAMA_VERSION"
+  echo "Install dir     : $INSTALL_DIR"
+  echo "Build dir       : $BUILD_DIR"
+  echo "CANN root       : ${CANN_TOOLKIT_ROOT:-<auto-detecting...>}"
+  echo "NPU count       : $NPU_COUNT × 910B3 ($(( NPU_COUNT * HBM_PER_NPU_MB / 1024 )) GB HBM total)"
+  echo ""
+}
 
 # ---------- 0. Helpers ----------
 fail() { echo "[ERROR] $*" >&2; exit 1; }
+info() { echo "[INFO] $*"; }
+ok()   { echo "[OK]   $*"; }
 
 # ---------- 0a. Auto-install Go (no sudo) ----------
 install_go_local() {
@@ -116,12 +130,14 @@ echo "[OK] $(npu-smi --version 2>/dev/null | head -1 || echo 'npu-smi present')"
 
 # ---------- 1. Auto-detect and source CANN environment ----------
 echo ""
-echo "[1/5] Locating CANN toolkit..."
+echo "[1/5] Locating CANN toolkit (target: 25.5.0 / Ascend 910B3)..."
 
 find_cann_root() {
+  # 1. Explicit override
   if [ -n "${ASCEND_HOME:-}" ] && [ -d "${ASCEND_HOME}" ]; then
     echo "${ASCEND_HOME}"; return 0
   fi
+  # 2. Derive from npu-smi binary path (most reliable)
   if command -v npu-smi &>/dev/null; then
     local bin_dir
     bin_dir=$(dirname "$(command -v npu-smi)")
@@ -131,10 +147,15 @@ find_cann_root() {
       fi
     done
   fi
+  # 3. Common CANN 25.x install paths (sysadmin-managed and user-local)
   for candidate in \
+      "/usr/local/Ascend/ascend-toolkit/latest" \
+      "/usr/local/Ascend/ascend-toolkit/25.5.0" \
       "$HOME/Ascend/ascend-toolkit/latest" \
+      "$HOME/Ascend/ascend-toolkit/25.5.0" \
       "$HOME/ascend-toolkit/latest" \
       "/opt/Ascend/ascend-toolkit/latest" \
+      "/opt/Ascend/ascend-toolkit/25.5.0" \
       "/opt/ascend/ascend-toolkit/latest"; do
     [ -d "$candidate" ] && echo "$candidate" && return 0
   done
@@ -144,11 +165,12 @@ find_cann_root() {
 CANN_TOOLKIT_ROOT=$(find_cann_root)
 
 if [ -z "$CANN_TOOLKIT_ROOT" ]; then
-  fail "CANN toolkit not found. Set ASCEND_HOME to its path, e.g.:
-       export ASCEND_HOME=/path/to/ascend-toolkit/latest"
+  fail "CANN toolkit not found. Set ASCEND_HOME to its root, e.g.:
+       export ASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest"
 fi
-echo "[OK] CANN toolkit: $CANN_TOOLKIT_ROOT"
+ok "CANN toolkit: $CANN_TOOLKIT_ROOT"
 
+# Source the CANN environment (sets ASCEND_TOOLKIT_HOME, PATH, LD_LIBRARY_PATH, etc.)
 if [ -f "$CANN_TOOLKIT_ROOT/bin/setenv.bash" ]; then
   # shellcheck disable=SC1090
   source "$CANN_TOOLKIT_ROOT/bin/setenv.bash"
@@ -156,8 +178,29 @@ elif [ -f "$CANN_TOOLKIT_ROOT/bin/setenv.sh" ]; then
   # shellcheck disable=SC1090
   source "$CANN_TOOLKIT_ROOT/bin/setenv.sh"
 fi
-export LD_LIBRARY_PATH="${CANN_TOOLKIT_ROOT}/lib64:${CANN_TOOLKIT_ROOT}/acllib/lib64:${LD_LIBRARY_PATH:-}"
-echo "[OK] CANN env ready"
+
+# llama.cpp's CANN backend looks for ASCEND_TOOLKIT_HOME (not CANN_TOOLKIT_ROOT).
+# Export both so every downstream tool finds what it needs.
+export ASCEND_TOOLKIT_HOME="${CANN_TOOLKIT_ROOT}"
+export ASCEND_HOME="${CANN_TOOLKIT_ROOT}"
+
+# Build a comprehensive LD_LIBRARY_PATH covering CANN 25.x directory layout.
+# 910B3 uses the standard acllib paths; atc and fwkacllib may also be needed at runtime.
+_CANN_LIBS="${CANN_TOOLKIT_ROOT}/lib64"
+_CANN_LIBS+=":${CANN_TOOLKIT_ROOT}/acllib/lib64"
+_CANN_LIBS+=":${CANN_TOOLKIT_ROOT}/atc/lib64"
+_CANN_LIBS+=":${CANN_TOOLKIT_ROOT}/fwkacllib/lib64"
+export LD_LIBRARY_PATH="${_CANN_LIBS}:${LD_LIBRARY_PATH:-}"
+
+# Confirm the CANN version matches what npu-smi reports (25.5.0)
+if command -v npu-smi &>/dev/null; then
+  DETECTED_CANN_VER=$(npu-smi info 2>/dev/null | grep -oP 'Version:\s*\K[\d.]+' | head -1 || true)
+  [ -n "$DETECTED_CANN_VER" ] && info "Detected CANN/npu-smi version: $DETECTED_CANN_VER"
+fi
+ok "CANN env ready"
+
+# Print banner now that CANN_TOOLKIT_ROOT is resolved
+print_banner
 
 # ---------- 2. Clone Ollama ----------
 echo ""
@@ -274,14 +317,22 @@ cmake -S "$LLAMA_SRC" -B "$LLAMA_BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF \
-    -DCMAKE_INSTALL_PREFIX="$LLAMA_BUILD_DIR/install"
+    -DCMAKE_INSTALL_PREFIX="$LLAMA_BUILD_DIR/install" \
+    -DGGML_NATIVE=OFF \
+    -DASCEND_TOOLKIT_HOME="${CANN_TOOLKIT_ROOT}" \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+# Build with all available CPU threads; on a multi-socket server this can be
+# large — cap at 32 to avoid OOM during compilation if RAM is limited.
+BUILD_JOBS=$(( $(nproc) < 32 ? $(nproc) : 32 ))
+info "Building with $BUILD_JOBS parallel jobs (nproc=$(nproc))"
 
 cmake --build "$LLAMA_BUILD_DIR" \
     --config Release \
-    -j"$(nproc)" \
+    -j"$BUILD_JOBS" \
     --target llama-server ggml
 
-echo "[OK] llama.cpp built with CANN support"
+ok "llama.cpp built with CANN support (910B3)"
 
 # ---------- 4. Build Ollama Go binary ----------
 echo ""
@@ -297,40 +348,74 @@ export GOTOOLCHAIN=local
 export GOPROXY=direct
 export GONOSUMDB="*"
 
-go build -o ollama . 2>&1 | tail -10
+# Tag the binary with build metadata for easy identification later
+BUILD_TAGS="cann"
+go build -tags "$BUILD_TAGS" -o ollama . 2>&1 | tail -10
 
 cd - > /dev/null
-echo "[OK] Ollama binary built: $BUILD_DIR/ollama"
+ok "Ollama binary built: $BUILD_DIR/ollama"
 
 # ---------- 5. Install ----------
 echo ""
-echo "[5/5] Installing to $INSTALL_DIR ..."
+echo "[5/6] Installing to $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
 cp "$BUILD_DIR/ollama" "$INSTALL_DIR/ollama"
 chmod +x "$INSTALL_DIR/ollama"
 
+# ---------- 6. Verify binary and NPU visibility ----------
+echo ""
+echo "[6/6] Verifying installation..."
+
+export PATH="$INSTALL_DIR:$GO_INSTALL_DIR/bin:$PATH"
+
+OLLAMA_VER=$("$INSTALL_DIR/ollama" --version 2>/dev/null || echo "unknown")
+ok "ollama binary: $OLLAMA_VER"
+
+# Confirm all 8 NPUs are visible via npu-smi
+echo ""
+info "NPU status (all 8 Ascend 910B3 cards should show OK):"
+npu-smi info 2>/dev/null | grep -E "(NPU|910B3|Health|OK|ERROR)" | head -20 || true
+
+# Quick CANN library sanity check
+if ldconfig -p 2>/dev/null | grep -q "libascendcl"; then
+  ok "libascendcl found in ldconfig cache"
+else
+  # Not in ldconfig — check LD_LIBRARY_PATH directly
+  for libdir in $(echo "$LD_LIBRARY_PATH" | tr ':' ' '); do
+    if [ -f "$libdir/libascendcl.so" ]; then
+      ok "libascendcl.so found in $libdir"
+      break
+    fi
+  done
+fi
+
 echo ""
 echo "========================================================"
-echo " Build complete!"
+echo " Build complete!  (Ascend 910B3 × $NPU_COUNT — CANN 25.5.0)"
 echo "========================================================"
 echo ""
-echo "Binary location : $INSTALL_DIR/ollama"
+echo "Binary          : $INSTALL_DIR/ollama"
+echo "Total HBM       : $(( NPU_COUNT * HBM_PER_NPU_MB / 1024 )) GB  ($NPU_COUNT × $(( HBM_PER_NPU_MB / 1024 )) GB)"
 echo ""
 echo "Next steps:"
-echo "  1. Add the install dirs to your PATH (paste into ~/.bashrc to make permanent):"
+echo "  1. Add install dirs to PATH (add to ~/.bashrc to make permanent):"
 echo "       export PATH=\"$GO_INSTALL_DIR/bin:$INSTALL_DIR:\$PATH\""
+echo "       export ASCEND_TOOLKIT_HOME=\"$CANN_TOOLKIT_ROOT\""
+echo "       export LD_LIBRARY_PATH=\"$_CANN_LIBS:\$LD_LIBRARY_PATH\""
 echo ""
-echo "  2. Register your model (one time):"
+echo "  2. Pull a model (first time only):"
 echo "       bash setup_model.sh"
 echo ""
-echo "  3. Start the server:"
+echo "  3. Start the server (uses all 8 NPUs by default):"
 echo "       bash start_server.sh"
 echo ""
-echo "  4. Check NPU status:"
+echo "  4. Check NPU utilisation:"
+echo "       watch -n1 npu-smi info"
 echo "       curl http://localhost:8000/npu/status | python3 -m json.tool"
 echo ""
 echo "Troubleshooting:"
-echo "  • If ollama serve exits immediately, check logs/ollama.log"
-echo "  • Confirm CANN libs are on LD_LIBRARY_PATH (source CANN setenv.bash first)"
-echo "  • Verify NPUs are visible: npu-smi info"
-echo "  • Ollama CANN issues tracker: https://github.com/ollama/ollama/issues"
+echo "  • Ollama exits immediately  → check logs/ollama.log; ensure CANN env is sourced"
+echo "  • CANN libs missing         → source \$ASCEND_TOOLKIT_HOME/bin/setenv.bash"
+echo "  • NPU not detected          → check ASCEND_RT_VISIBLE_DEVICES in start_server.sh"
+echo "  • Multi-card inference slow → check HCCL_WHITELIST_DISABLE=1 in start_server.sh"
+echo "  • Upstream CANN issues      → https://github.com/ollama/ollama/issues (filter: cann)"
