@@ -15,7 +15,7 @@ Uses the CANN backend via an Ollama binary built with GGML_CANN support.
 Usage
 -----
 Set env vars (or let start_server.sh handle it):
-  MODEL_NAME=llama3
+  MODEL_NAME=gpt-oss:20b
   OLLAMA_BASE_URL=http://localhost:11434
   ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 

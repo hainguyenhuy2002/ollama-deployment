@@ -15,7 +15,7 @@
 set -e
 
 # ---------- Config — edit as needed ----------
-MODEL_NAME="llama3"        # Ollama hub model tag (ollama.com/library)
+MODEL_NAME="gpt-oss:20b"        # Ollama hub model tag (ollama.com/library)
 OLLAMA_PORT=11434
 # ---------------------------------------------
 

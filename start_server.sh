@@ -31,7 +31,7 @@ NPUS="0,1,2,3,4,5,6,7"
 
 OLLAMA_PORT=11434            # Ollama daemon port
 API_PORT=8000                # FastAPI server port
-MODEL_NAME="llama3"          # Ollama hub model tag (must match setup_model.sh)
+MODEL_NAME="gpt-oss:20b"          # Ollama hub model tag (must match setup_model.sh)
 LOG_DIR="./logs"
 HBM_PER_NPU_GB=64           # HBM per Ascend 910B3 in GB
 # (CANN_TOOLKIT_ROOT is auto-detected below — no need to set it manually)
