@@ -179,6 +179,131 @@ If you also started Ollama manually:
 pkill -f "ollama serve"
 ```
 
+## 8. Fine-Tune with NPU
+
+Ollama does not train models by itself. The workflow is:
+
+```text
+fine-tune with torch_npu + LoRA -> merge adapter -> convert to GGUF -> create/use an Ollama model
+```
+
+The example task fine-tunes `Qwen/Qwen2.5-0.5B-Instruct` on real medical flashcard data from Hugging Face:
+
+```text
+medalpaca/medical_meadow_medical_flashcards
+```
+
+The default run uses 1000 examples and 800 LoRA steps on one Ascend NPU. It is intended as a short test job, around 1-2 hours depending on server load.
+
+### Prepare Fine-Tuning Environment
+
+Run once:
+
+```bash
+bash finetune/setup_finetune_env.sh
+```
+
+This creates:
+
+```text
+.venv-finetune/
+```
+
+and installs PyTorch, `torch-npu`, Transformers, PEFT, and Datasets.
+
+If the default `torch-npu` version does not match the server CANN version, override it:
+
+```bash
+TORCH_VERSION=2.5.1 \
+TORCH_NPU_VERSION=2.5.1.post1 \
+bash finetune/setup_finetune_env.sh
+```
+
+### Start Fine-Tuning in byobu
+
+Start the task in a detached byobu session:
+
+```bash
+byobu new-session -d -s llm-finetune \
+  'cd /path/to/ollama-deployment && bash finetune/run_finetune_task.sh 2>&1 | tee logs/finetune.log'
+```
+
+Attach to watch it:
+
+```bash
+byobu attach -t llm-finetune
+```
+
+Detach without stopping it:
+
+```text
+Ctrl-a d
+```
+
+Useful overrides:
+
+```bash
+ASCEND_VISIBLE_DEVICES=0 \
+MAX_SAMPLES=1000 \
+MAX_STEPS=800 \
+BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+bash finetune/run_finetune_task.sh
+```
+
+The script writes:
+
+```text
+data/medical_flashcards_lora.jsonl
+outputs/qwen2.5-0.5b-medical-lora/
+logs/finetune.log
+logs/finetune_npu_before.log
+logs/finetune_npu_after.log
+```
+
+Check NPU usage while training:
+
+```bash
+npu-smi info
+```
+
+Expected signs:
+
+- a Python training process appears in the NPU process table
+- HBM usage increases
+- `AICore(%)` rises during training steps
+
+### Export Fine-Tuned Model to Ollama
+
+After training finishes, merge the LoRA adapter and create an Ollama model:
+
+```bash
+bash finetune/export_lora_to_ollama.sh
+```
+
+Default output:
+
+```text
+outputs/qwen2.5-0.5b-medical-q4_0.gguf
+qwen2.5-0.5b-medical-npu
+```
+
+Test with Ollama:
+
+```bash
+ollama run qwen2.5-0.5b-medical-npu "What is metformin commonly used for?"
+```
+
+To serve the fine-tuned GGUF through the NPU API:
+
+```bash
+MODEL_PATH=outputs/qwen2.5-0.5b-medical-q4_0.gguf \
+MODEL_NAME=qwen2.5-0.5b-medical-npu \
+LLM_BACKEND=llama_cpp \
+ACCELERATOR=ascend \
+ASCEND_VISIBLE_DEVICES=0 \
+bash start_server.sh
+```
+
 ## Notes
 
 - The deployment uses the model pulled by Ollama, but inference is served by CANN-enabled `llama.cpp`.

@@ -1,5 +1,8 @@
 logs/
 llama.cpp/
 models/
+data/
+outputs/
+.venv-finetune/
 __pycache__/
 *.py[cod]
