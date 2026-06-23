@@ -36,6 +36,7 @@ THREADS="${THREADS:-$(nproc)}"
 mkdir -p "$LOG_DIR"
 
 load_ascend_env() {
+  set +u
   if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
     # shellcheck disable=SC1091
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -43,6 +44,7 @@ load_ascend_env() {
     # shellcheck disable=SC1091
     source /usr/local/Ascend/cann/set_env.sh
   fi
+  set -u
 
   export ASCEND_VISIBLE_DEVICES
   export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$ASCEND_VISIBLE_DEVICES}"

@@ -11,6 +11,7 @@ LLAMA_CPP_REPO="${LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
 BUILD_DIR="${LLAMA_CPP_BUILD_DIR:-$LLAMA_CPP_DIR/build}"
 
 load_ascend_env() {
+  set +u
   if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
     # shellcheck disable=SC1091
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -20,6 +21,7 @@ load_ascend_env() {
   else
     echo "[WARN] Could not find Ascend set_env.sh under /usr/local/Ascend."
   fi
+  set -u
 }
 
 echo "=== Building llama.cpp with CANN backend ==="
@@ -40,6 +42,8 @@ fi
 
 cmake -S "$LLAMA_CPP_DIR" -B "$BUILD_DIR" \
   -DGGML_CANN=on \
+  -DLLAMA_BUILD_UI=OFF \
+  -DLLAMA_USE_PREBUILT_UI=OFF \
   -DCMAKE_BUILD_TYPE=Release
 
 cmake --build "$BUILD_DIR" --config Release -j"$(nproc)" --target llama-server llama-quantize
