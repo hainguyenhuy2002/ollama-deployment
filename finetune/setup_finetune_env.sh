@@ -7,6 +7,7 @@ VENV_DIR="${VENV_DIR:-.venv-finetune}"
 TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
 TORCH_NPU_VERSION="${TORCH_NPU_VERSION:-2.5.1.post1}"
 ASCEND_PYPI_INDEX="${ASCEND_PYPI_INDEX:-https://mirrors.huaweicloud.com/ascend/repos/pypi}"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 load_ascend_env() {
   set +u
@@ -21,6 +22,7 @@ load_ascend_env() {
 }
 
 load_ascend_env
+export HF_ENDPOINT
 
 if ! python3 -m venv "$VENV_DIR"; then
   echo "[WARN] python3 -m venv failed. Falling back to user-installed virtualenv."

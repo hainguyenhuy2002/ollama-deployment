@@ -14,6 +14,7 @@ MAX_STEPS="${MAX_STEPS:-800}"
 ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-0}"
 ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$ASCEND_VISIBLE_DEVICES}"
 STOP_SERVING="${STOP_SERVING:-1}"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 load_ascend_env() {
   set +u
@@ -30,6 +31,7 @@ load_ascend_env() {
 mkdir -p logs data outputs
 load_ascend_env
 export ASCEND_VISIBLE_DEVICES ASCEND_RT_VISIBLE_DEVICES
+export HF_ENDPOINT
 export TOKENIZERS_PARALLELISM=false
 
 if [ "$STOP_SERVING" = "1" ]; then

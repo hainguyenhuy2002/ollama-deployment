@@ -195,6 +195,12 @@ medalpaca/medical_meadow_medical_flashcards
 
 The default run uses 1000 examples and 800 LoRA steps on one Ascend NPU. It is intended as a short test job, around 1-2 hours depending on server load.
 
+On clusters that cannot reach `huggingface.co` directly, the scripts default to:
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com
+```
+
 ### Prepare Fine-Tuning Environment
 
 Run once:
@@ -244,6 +250,7 @@ Useful overrides:
 
 ```bash
 ASCEND_VISIBLE_DEVICES=0 \
+HF_ENDPOINT=https://hf-mirror.com \
 MAX_SAMPLES=1000 \
 MAX_STEPS=800 \
 BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct \
