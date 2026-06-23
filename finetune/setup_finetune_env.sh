@@ -22,7 +22,12 @@ load_ascend_env() {
 
 load_ascend_env
 
-python3 -m venv "$VENV_DIR"
+if ! python3 -m venv "$VENV_DIR"; then
+  echo "[WARN] python3 -m venv failed. Falling back to user-installed virtualenv."
+  rm -rf "$VENV_DIR"
+  python3 -m pip install --user virtualenv
+  python3 -m virtualenv "$VENV_DIR"
+fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
