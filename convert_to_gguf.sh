@@ -7,19 +7,21 @@
 # Fixes: "Error: unknown data type: I32" from Ollama's built-in converter.
 # =============================================================================
 
-set -e
+set -euo pipefail
 
-MODEL_PATH="/villa/rhh25/mixtral"
-MODEL_NAME="mixtral-local"
-GGUF_OUT="${MODEL_PATH}/model-f16.gguf"     # where to write the GGUF
-QUANT_OUT="${MODEL_PATH}/model-q4_k_m.gguf" # quantized version (smaller/faster)
-MODELFILE_PATH="./Modelfile"
-LLAMA_CPP_DIR="./llama.cpp"
+MODEL_PATH="${MODEL_PATH:-/villa/rhh25/models/llama3.3-70b}"
+MODEL_NAME="${MODEL_NAME:-llama3.3-70b-ascend}"
+GGUF_OUT="${GGUF_OUT:-${MODEL_PATH}/model-f16.gguf}"
+QUANT_TYPE="${QUANT_TYPE:-Q4_0}"
+QUANT_OUT="${QUANT_OUT:-${MODEL_PATH}/model-${QUANT_TYPE,,}.gguf}"
+MODELFILE_PATH="${MODELFILE_PATH:-./Modelfile}"
+LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-./llama.cpp}"
+LLAMA_CPP_BUILD_DIR="${LLAMA_CPP_BUILD_DIR:-$LLAMA_CPP_DIR/build}"
 
 echo "=== GGUF Conversion via llama.cpp ==="
 echo "Source  : $MODEL_PATH"
 echo "Output  : $GGUF_OUT"
-echo "Quant   : $QUANT_OUT"
+echo "Quant   : $QUANT_OUT ($QUANT_TYPE)"
 
 # ---------- 1. Install Python deps ----------
 echo ""
@@ -31,7 +33,7 @@ pip install --break-system-packages --quiet \
 echo ""
 echo "[2/5] Setting up llama.cpp..."
 if [ ! -d "$LLAMA_CPP_DIR" ]; then
-    git clone --depth=1 https://github.com/ggerganov/llama.cpp "$LLAMA_CPP_DIR"
+    git clone --depth=1 https://github.com/ggml-org/llama.cpp "$LLAMA_CPP_DIR"
     echo "[OK] Cloned llama.cpp"
 else
     echo "[OK] llama.cpp already present, pulling latest..."
@@ -67,22 +69,22 @@ python3 "$CONVERT_SCRIPT" \
 echo "[OK] GGUF written to: $GGUF_OUT"
 ls -lh "$GGUF_OUT"
 
-# ---------- 4. Quantize to Q4_K_M (optional but recommended) ----------
-# Q4_K_M = ~4-bit quantisation, excellent quality/speed trade-off on A100.
+# ---------- 4. Quantize to an Ascend/CANN-friendly type ----------
+# llama.cpp CANN support is strongest with FP16, Q4_0, and Q8_0.
 echo ""
-echo "[4/5] Quantizing to Q4_K_M (faster inference, ~50% smaller)..."
+echo "[4/5] Quantizing to $QUANT_TYPE..."
 
 # Build llama-quantize if not already built
-if [ ! -f "$LLAMA_CPP_DIR/llama-quantize" ] && [ ! -f "$LLAMA_CPP_DIR/quantize" ]; then
+if [ ! -f "$LLAMA_CPP_BUILD_DIR/bin/llama-quantize" ] && \
+   [ ! -f "$LLAMA_CPP_DIR/llama-quantize" ] && \
+   [ ! -f "$LLAMA_CPP_DIR/quantize" ]; then
     echo "      Building llama.cpp quantize tool..."
-    cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON > /dev/null 2>&1
-    cmake --build "$LLAMA_CPP_DIR/build" --config Release -j"$(nproc)" --target llama-quantize > /dev/null 2>&1
-    cp "$LLAMA_CPP_DIR/build/bin/llama-quantize" "$LLAMA_CPP_DIR/" 2>/dev/null || \
-    cp "$LLAMA_CPP_DIR/build/llama-quantize"     "$LLAMA_CPP_DIR/" 2>/dev/null || true
+    cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release > /dev/null
+    cmake --build "$LLAMA_CPP_BUILD_DIR" --config Release -j"$(nproc)" --target llama-quantize > /dev/null
 fi
 
 QUANTIZE_BIN=""
-for bin in "$LLAMA_CPP_DIR/llama-quantize" "$LLAMA_CPP_DIR/quantize" "$LLAMA_CPP_DIR/build/bin/llama-quantize"; do
+for bin in "$LLAMA_CPP_BUILD_DIR/bin/llama-quantize" "$LLAMA_CPP_DIR/llama-quantize" "$LLAMA_CPP_DIR/quantize"; do
     if [ -f "$bin" ]; then
         QUANTIZE_BIN="$bin"
         break
@@ -90,7 +92,7 @@ for bin in "$LLAMA_CPP_DIR/llama-quantize" "$LLAMA_CPP_DIR/quantize" "$LLAMA_CPP
 done
 
 if [ -n "$QUANTIZE_BIN" ]; then
-    "$QUANTIZE_BIN" "$GGUF_OUT" "$QUANT_OUT" Q4_K_M
+    "$QUANTIZE_BIN" "$GGUF_OUT" "$QUANT_OUT" "$QUANT_TYPE"
     echo "[OK] Quantized model: $QUANT_OUT"
     ls -lh "$QUANT_OUT"
     USE_GGUF="$QUANT_OUT"

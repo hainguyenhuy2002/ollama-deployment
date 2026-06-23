@@ -7,17 +7,18 @@ FastAPI server that wraps the local Ollama instance and exposes:
   - POST /generate              — Raw Ollama generate passthrough
   - GET  /v1/models             — List available models
   - GET  /health                — Health check
-  - GET  /gpu/status            — Live nvidia-smi snapshot
+  - GET  /accelerator/status    — Live nvidia-smi or npu-smi snapshot
+  - GET  /gpu/status            — Backward-compatible alias
 
-Designed for a 7× NVIDIA A100-SXM4-40GB server.
-GPU 0 is excluded by default (busy); GPUs 1-6 are used.
+Designed for local LLM runtimes. Set LLM_BACKEND=ollama for Ollama, or
+LLM_BACKEND=llama_cpp for llama.cpp server (CANN/Ascend NPU path).
 
 Usage
 -----
 Set env vars (or let start_server.sh handle it):
   MODEL_NAME=mixtral-local
   OLLAMA_BASE_URL=http://localhost:11434
-  CUDA_VISIBLE_DEVICES=1,2,3,4,5,6
+  LLM_BACKEND=ollama
 
 Then:
   python api_server.py
@@ -29,6 +30,8 @@ import time
 import subprocess
 import asyncio
 import logging
+import re
+import shutil
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
@@ -41,11 +44,15 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL_NAME      = os.getenv("MODEL_NAME",      "mixtral-local")
-HOST            = os.getenv("API_HOST",        "0.0.0.0")
-PORT            = int(os.getenv("API_PORT",    "8000"))
-LOG_LEVEL       = os.getenv("LOG_LEVEL",       "INFO")
+LLM_BACKEND       = os.getenv("LLM_BACKEND", "ollama").strip().lower()
+OLLAMA_BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+LLAMA_CPP_BASE_URL = os.getenv("LLAMA_CPP_BASE_URL", "http://localhost:8080")
+MODEL_NAME        = os.getenv("MODEL_NAME", "mixtral-local")
+HOST              = os.getenv("API_HOST", "0.0.0.0")
+PORT              = int(os.getenv("API_PORT", "8000"))
+LOG_LEVEL         = os.getenv("LOG_LEVEL", "INFO")
+
+BACKEND_BASE_URL = LLAMA_CPP_BASE_URL if LLM_BACKEND == "llama_cpp" else OLLAMA_BASE_URL
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -58,10 +65,15 @@ logger = logging.getLogger("llm-api")
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Connecting to Ollama at {OLLAMA_BASE_URL} …")
+    logger.info(f"Connecting to {LLM_BACKEND} backend at {BACKEND_BASE_URL} ...")
     async with httpx.AsyncClient(timeout=10) as client:
         for attempt in range(10):
             try:
+                if LLM_BACKEND == "llama_cpp":
+                    r = await client.get(f"{BACKEND_BASE_URL}/health")
+                    r.raise_for_status()
+                    logger.info("llama.cpp server ready.")
+                    break
                 r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
                 r.raise_for_status()
                 models = [m["name"] for m in r.json().get("models", [])]
@@ -73,10 +85,10 @@ async def lifespan(app: FastAPI):
                     )
                 break
             except Exception as exc:
-                logger.warning(f"Attempt {attempt+1}/10 — Ollama not ready: {exc}")
+                logger.warning(f"Attempt {attempt+1}/10 - backend not ready: {exc}")
                 await asyncio.sleep(2)
         else:
-            logger.error("Could not reach Ollama after 10 attempts. Proceeding anyway.")
+            logger.error("Could not reach backend after 10 attempts. Proceeding anyway.")
     yield  # server runs here
     logger.info("Shutting down.")
 
@@ -85,8 +97,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="LLM Deployment API",
-    description="OpenAI-compatible API backed by Ollama on multi-GPU A100 server",
-    version="1.0.0",
+    description="OpenAI-compatible API backed by Ollama or llama.cpp/CANN",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -155,6 +167,71 @@ async def _ollama_post(url: str, payload: dict) -> dict:
         r.raise_for_status()
         return r.json()
 
+
+async def _proxy_openai(path: str, payload: dict, stream: bool = False):
+    """Proxy OpenAI-compatible requests to llama.cpp server."""
+    url = f"{LLAMA_CPP_BASE_URL}{path}"
+    timeout = httpx.Timeout(300.0, connect=10.0)
+    if stream:
+        async def event_stream():
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        if chunk:
+                            yield chunk
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+def _run_status_command(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+
+def _parse_npu_smi_info(raw: str) -> list[dict]:
+    """Parse the two-line device records emitted by `npu-smi info`."""
+    npus = []
+    lines = raw.splitlines()
+    for i, line in enumerate(lines[:-1]):
+        first = re.match(
+            r"^\|\s*(\d+)\s+(\S+)\s+\|\s+(\S+)\s+\|\s+"
+            r"([\d.]+)\s+(\d+)\s+(\d+)\s*/\s*(\d+)\s+\|",
+            line,
+        )
+        if not first:
+            continue
+
+        second = re.match(
+            r"^\|\s*(\d+)\s+\|\s+([0-9a-fA-F:.]+)\s+\|\s+"
+            r"(\d+)\s+(\d+)\s*/\s*(\d+)\s+(\d+)\s*/\s*(\d+)\s+\|",
+            lines[i + 1],
+        )
+        if not second:
+            continue
+
+        npus.append({
+            "index": int(first.group(1)),
+            "name": first.group(2),
+            "health": first.group(3),
+            "power_w": float(first.group(4)),
+            "temp_c": int(first.group(5)),
+            "hugepages_used_pages": int(first.group(6)),
+            "hugepages_total_pages": int(first.group(7)),
+            "chip": int(second.group(1)),
+            "bus_id": second.group(2),
+            "aicore_pct": int(second.group(3)),
+            "memory_used_mib": int(second.group(4)),
+            "memory_total_mib": int(second.group(5)),
+            "hbm_used_mib": int(second.group(6)),
+            "hbm_total_mib": int(second.group(7)),
+        })
+    return npus
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -164,26 +241,45 @@ async def health():
     """Quick health check."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            endpoint = "/health" if LLM_BACKEND == "llama_cpp" else "/api/tags"
+            r = await client.get(f"{BACKEND_BASE_URL}{endpoint}")
             r.raise_for_status()
-        return {"status": "ok", "ollama": OLLAMA_BASE_URL, "model": MODEL_NAME}
+        return {
+            "status": "ok",
+            "backend": LLM_BACKEND,
+            "backend_url": BACKEND_BASE_URL,
+            "model": MODEL_NAME,
+        }
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Ollama unreachable: {exc}")
+        raise HTTPException(status_code=503, detail=f"LLM backend unreachable: {exc}")
 
 
-@app.get("/gpu/status")
-async def gpu_status():
-    """Return live nvidia-smi output as JSON."""
+@app.get("/accelerator/status")
+async def accelerator_status():
+    """Return live accelerator status from npu-smi or nvidia-smi."""
     try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,name,temperature.gpu,utilization.gpu,"
-                "memory.used,memory.total,power.draw,power.limit",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True, text=True, timeout=10,
-        )
+        if shutil.which("npu-smi"):
+            result = _run_status_command(["npu-smi", "info"])
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "npu-smi failed")
+            return {
+                "accelerator": "npu",
+                "npus": _parse_npu_smi_info(result.stdout),
+                "raw": result.stdout,
+                "timestamp": time.time(),
+            }
+
+        if not shutil.which("nvidia-smi"):
+            raise RuntimeError("Neither npu-smi nor nvidia-smi was found")
+
+        result = _run_status_command([
+            "nvidia-smi",
+            "--query-gpu=index,name,temperature.gpu,utilization.gpu,"
+            "memory.used,memory.total,power.draw,power.limit",
+            "--format=csv,noheader,nounits",
+        ])
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "nvidia-smi failed")
         gpus = []
         for line in result.stdout.strip().splitlines():
             idx, name, temp, util, mem_used, mem_total, pwr, pwr_lim = [
@@ -199,14 +295,31 @@ async def gpu_status():
                 "power_w":        float(pwr),
                 "power_limit_w":  float(pwr_lim),
             })
-        return {"gpus": gpus, "timestamp": time.time()}
+        return {"accelerator": "gpu", "gpus": gpus, "timestamp": time.time()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/gpu/status")
+async def gpu_status():
+    """Backward-compatible accelerator status alias."""
+    return await accelerator_status()
 
 
 @app.get("/v1/models")
 async def list_models():
     """OpenAI-compatible model list."""
+    if LLM_BACKEND == "llama_cpp":
+        return {
+            "object": "list",
+            "data": [{
+                "id": MODEL_NAME,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "local",
+            }],
+        }
+
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
         r.raise_for_status()
@@ -230,6 +343,18 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
     model = _resolve_model(req.model)
+    if LLM_BACKEND == "llama_cpp":
+        payload = {
+            "model": model,
+            "messages": [m.model_dump() for m in req.messages],
+            "temperature": req.temperature,
+            "top_p": req.top_p,
+            "max_tokens": req.max_tokens,
+            "stream": req.stream,
+            **({"stop": req.stop} if req.stop else {}),
+        }
+        return await _proxy_openai("/v1/chat/completions", payload, req.stream)
+
     payload = {
         "model":  model,
         "messages": [m.model_dump() for m in req.messages],
@@ -305,6 +430,17 @@ async def chat_completions(req: ChatCompletionRequest):
 @app.post("/v1/completions")
 async def completions(req: CompletionRequest):
     model = _resolve_model(req.model)
+    if LLM_BACKEND == "llama_cpp":
+        payload = {
+            "model": model,
+            "prompt": req.prompt,
+            "temperature": req.temperature,
+            "top_p": req.top_p,
+            "max_tokens": req.max_tokens,
+            "stream": req.stream,
+        }
+        return await _proxy_openai("/v1/completions", payload, req.stream)
+
     payload = {
         "model":  model,
         "prompt": req.prompt,
@@ -369,6 +505,28 @@ async def completions(req: CompletionRequest):
 @app.post("/generate")
 async def generate(req: GenerateRequest):
     model = _resolve_model(req.model)
+    if LLM_BACKEND == "llama_cpp":
+        prompt = req.prompt if not req.system else f"{req.system}\n\n{req.prompt}"
+        payload = {
+            "prompt": prompt,
+            "stream": req.stream,
+            "temperature": (req.options or {}).get("temperature", 0.7),
+            "top_p": (req.options or {}).get("top_p", 0.9),
+            "n_predict": (req.options or {}).get("num_predict", 2048),
+        }
+        endpoint = "/completion"
+        if req.stream:
+            return await _proxy_openai(endpoint, payload, True)
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(f"{LLAMA_CPP_BASE_URL}{endpoint}", json=payload)
+            r.raise_for_status()
+            data = r.json()
+        return {
+            "model": model,
+            "response": data.get("content", ""),
+            "done": True,
+        }
+
     payload = {
         "model":  model,
         "prompt": req.prompt,
@@ -394,5 +552,5 @@ async def generate(req: GenerateRequest):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting API server on {HOST}:{PORT}")
+    logger.info(f"Starting API server on {HOST}:{PORT} with backend={LLM_BACKEND}")
     uvicorn.run("api_server:app", host=HOST, port=PORT, reload=False, workers=1)

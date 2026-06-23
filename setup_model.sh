@@ -5,11 +5,11 @@
 # Run this ONCE before starting the API server.
 # =============================================================================
 
-set -e
+set -euo pipefail
 
-MODEL_PATH="/villa/rhh25/mixtral"
-MODEL_NAME="mixtral-local"          # Name Ollama will use
-MODELFILE_PATH="./Modelfile"
+MODEL_PATH="${MODEL_PATH:-/villa/rhh25/models/llama3.3-70b}"
+MODEL_NAME="${MODEL_NAME:-llama3.3-70b-ollama}"
+MODELFILE_PATH="${MODELFILE_PATH:-./Modelfile}"
 
 echo "=== Ollama Local Model Setup ==="
 echo "Model path : $MODEL_PATH"
