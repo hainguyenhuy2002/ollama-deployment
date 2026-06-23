@@ -32,6 +32,7 @@ LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-$LLAMA_CPP_BUILD_DIR/bin/llama-server}"
 CTX_SIZE="${CTX_SIZE:-4096}"
 PARALLEL="${PARALLEL:-1}"
 THREADS="${THREADS:-$(nproc)}"
+READY_TIMEOUT="${READY_TIMEOUT:-}"
 
 mkdir -p "$LOG_DIR"
 
@@ -60,8 +61,9 @@ stop_existing() {
 wait_for_url() {
   local url="$1"
   local name="$2"
+  local timeout="${3:-120}"
   echo -n "[INFO] Waiting for $name "
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 "$timeout"); do
     if curl -sf "$url" >/dev/null 2>&1; then
       echo " ready!"
       return 0
@@ -70,7 +72,7 @@ wait_for_url() {
     sleep 1
   done
   echo ""
-  echo "[ERROR] $name did not become ready at $url"
+  echo "[ERROR] $name did not become ready at $url after ${timeout}s"
   return 1
 }
 
@@ -87,7 +89,7 @@ start_ollama() {
   echo "[INFO] Starting Ollama daemon on :$OLLAMA_PORT"
   nohup ollama serve > "$LOG_DIR/ollama.log" 2>&1 &
   echo "[INFO] Ollama PID: $!"
-  wait_for_url "http://localhost:$OLLAMA_PORT/api/tags" "Ollama"
+  wait_for_url "http://localhost:$OLLAMA_PORT/api/tags" "Ollama" "${READY_TIMEOUT:-120}"
 
   echo "[INFO] Pre-loading Ollama model '$MODEL_NAME'"
   ollama run "$MODEL_NAME" "Hello" >/dev/null 2>&1 || true
@@ -126,7 +128,7 @@ start_llama_cpp() {
     > "$LOG_DIR/llama-server.log" 2>&1 &
 
   echo "[INFO] llama-server PID: $!"
-  wait_for_url "http://localhost:$LLAMA_CPP_PORT/health" "llama.cpp server"
+  wait_for_url "http://localhost:$LLAMA_CPP_PORT/health" "llama.cpp server" "${READY_TIMEOUT:-900}"
 }
 
 start_api() {
@@ -141,7 +143,7 @@ start_api() {
     python3 api_server.py > "$LOG_DIR/api_server.log" 2>&1 &
 
   echo "[INFO] FastAPI PID: $!"
-  wait_for_url "http://localhost:$API_PORT/health" "FastAPI"
+  wait_for_url "http://localhost:$API_PORT/health" "FastAPI" "${API_READY_TIMEOUT:-120}"
 }
 
 echo "=== Starting LLM Server ==="
